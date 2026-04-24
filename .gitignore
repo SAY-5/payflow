@@ -1,0 +1,15 @@
+target/
+*.class
+*.jar
+.idea/
+*.iml
+.vscode/
+.DS_Store
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.db
+*.db-journal
+.env
+.env.*
+HELP.md

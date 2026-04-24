@@ -1,0 +1,80 @@
+package com.say5.payflow.persistence;
+
+import jakarta.persistence.*;
+import java.io.Serializable;
+import java.time.OffsetDateTime;
+import java.util.Objects;
+import java.util.UUID;
+
+@Entity
+@Table(name = "idempotency_keys")
+@IdClass(IdempotencyKey.Id.class)
+public class IdempotencyKey {
+    @jakarta.persistence.Id
+    @Column(name = "merchant_id")
+    private UUID merchantId;
+
+    @jakarta.persistence.Id
+    @Column(name = "key")
+    private String key;
+
+    @Column(name = "request_hash", nullable = false)
+    private String requestHash;
+
+    @Column(name = "response_status")
+    private Integer responseStatus;
+
+    @Column(name = "response_body", columnDefinition = "jsonb")
+    private String responseBody;
+
+    @Column(name = "completed_at")
+    private OffsetDateTime completedAt;
+
+    @Column(name = "created_at", nullable = false)
+    private OffsetDateTime createdAt = OffsetDateTime.now();
+
+    protected IdempotencyKey() {}
+
+    public IdempotencyKey(UUID merchantId, String key, String requestHash) {
+        this.merchantId = merchantId;
+        this.key = key;
+        this.requestHash = requestHash;
+    }
+
+    public void complete(int status, String body) {
+        this.responseStatus = status;
+        this.responseBody = body;
+        this.completedAt = OffsetDateTime.now();
+    }
+
+    public UUID getMerchantId() { return merchantId; }
+    public String getKey() { return key; }
+    public String getRequestHash() { return requestHash; }
+    public Integer getResponseStatus() { return responseStatus; }
+    public String getResponseBody() { return responseBody; }
+    public OffsetDateTime getCompletedAt() { return completedAt; }
+    public OffsetDateTime getCreatedAt() { return createdAt; }
+
+    public boolean isComplete() { return completedAt != null; }
+
+    public static class Id implements Serializable {
+        private UUID merchantId;
+        private String key;
+
+        public Id() {}
+        public Id(UUID merchantId, String key) {
+            this.merchantId = merchantId;
+            this.key = key;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof Id other)) return false;
+            return Objects.equals(merchantId, other.merchantId)
+                && Objects.equals(key, other.key);
+        }
+
+        @Override
+        public int hashCode() { return Objects.hash(merchantId, key); }
+    }
+}

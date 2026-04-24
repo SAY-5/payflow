@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payflow}
+      POSTGRES_DB: payflow
+    volumes:
+      - payflow-db:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  payflow:
+    build: .
+    image: payflow:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PAYFLOW_DB_URL: jdbc:postgresql://db:5432/payflow
+      PAYFLOW_DB_USER: payflow
+      PAYFLOW_DB_PASSWORD: ${POSTGRES_PASSWORD:-payflow}
+      PAYFLOW_JWT_SECRET: ${PAYFLOW_JWT_SECRET:-dev-secret-change-me-in-prod-32-chars}
+      PAYFLOW_CORS_ORIGINS: "${PAYFLOW_CORS_ORIGINS:-http://localhost:5173}"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  payflow-db:

@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:payflow;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;NON_KEYWORDS=USER,KEY,ACTION,AT,VALUE;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: none
+  flyway:
+    locations: classpath:db/migration-test
+    baseline-on-migrate: true
+
+payflow:
+  auth:
+    jwt-secret: test-secret-at-least-sixteen-chars-xxxxxxx
+    jwt-ttl-minutes: 60
+  webhook:
+    max-age-seconds: 300
+  cors:
+    origins: http://localhost:5173

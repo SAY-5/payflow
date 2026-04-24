@@ -1,0 +1,49 @@
+spring:
+  application:
+    name: payflow
+  datasource:
+    url: ${PAYFLOW_DB_URL:jdbc:postgresql://localhost:5432/payflow}
+    username: ${PAYFLOW_DB_USER:payflow}
+    password: ${PAYFLOW_DB_PASSWORD:payflow}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 4
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+        default_batch_fetch_size: 16
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+server:
+  port: ${PAYFLOW_PORT:8080}
+  error:
+    include-message: always
+  compression:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+payflow:
+  auth:
+    jwt-secret: ${PAYFLOW_JWT_SECRET:dev-secret-at-least-sixteen-chars-xxxxx}
+    jwt-ttl-minutes: ${PAYFLOW_JWT_TTL:60}
+  idempotency:
+    ttl-days: 7
+  webhook:
+    max-age-seconds: 300
+  cors:
+    origins: ${PAYFLOW_CORS_ORIGINS:http://localhost:5173}
