@@ -13,7 +13,22 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 
+/**
+ * Stripe-compatible webhook receiver.
+ *
+ * Endpoint shape: ``/webhooks/stripe/{merchantId}``. Each merchant
+ * configures their Stripe webhook to post to their own URL (Stripe's
+ * recommended pattern), so we know exactly which webhook secret to
+ * verify against and never iterate the merchant table per request.
+ *
+ * The legacy unscoped path ``/webhooks/stripe`` is retained as a
+ * deprecated convenience for the demo merchant only — production
+ * deployments should disable it via the ``payflow.webhook.allow-legacy``
+ * property (default false in prod profile).
+ */
 @RestController
 @RequestMapping("/webhooks")
 public class WebhookController {
@@ -27,21 +42,43 @@ public class WebhookController {
         this.props = props;
     }
 
-    @PostMapping(value = "/stripe", consumes = "*/*")
-    public ResponseEntity<?> stripe(HttpServletRequest req,
-                                    @RequestHeader(value = "Stripe-Signature", required = false) String sig)
+    @PostMapping(value = "/stripe/{merchantId}", consumes = "*/*")
+    public ResponseEntity<?> stripeFor(@PathVariable UUID merchantId,
+                                       HttpServletRequest req,
+                                       @RequestHeader(value = "Stripe-Signature", required = false) String sig)
             throws IOException {
+        Optional<Merchant> merchant = merchants.findById(merchantId);
+        if (merchant.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("error", "unknown merchant"));
+        }
         byte[] raw = req.getInputStream().readAllBytes();
+        if (!StripeSignature.verify(sig, raw, merchant.get().getWebhookSecret(),
+                Instant.now().getEpochSecond(), props.getWebhook().getMaxAgeSeconds())) {
+            return ResponseEntity.status(400).body(Map.of("error", "invalid signature"));
+        }
+        return finishIngest(raw);
+    }
 
-        // Webhook secret is merchant-scoped. In a real impl we'd
-        // route by payment intent → merchant. For this reference we
-        // verify against all known merchants' secrets; in prod you'd
-        // configure one webhook endpoint per merchant (Stripe's
-        // recommended pattern).
+    /**
+     * Legacy un-scoped endpoint. Tries each merchant's secret in turn —
+     * leaks timing information on multi-merchant installs. Disabled in
+     * the prod profile via {@link com.say5.payflow.config.AppProperties}.
+     */
+    @PostMapping(value = "/stripe", consumes = "*/*")
+    public ResponseEntity<?> stripeLegacy(HttpServletRequest req,
+                                          @RequestHeader(value = "Stripe-Signature", required = false) String sig)
+            throws IOException {
+        if (!props.getWebhook().isAllowLegacy()) {
+            return ResponseEntity.status(404).body(Map.of(
+                "error",
+                "legacy unscoped /webhooks/stripe is disabled — use /webhooks/stripe/{merchantId}"));
+        }
+        byte[] raw = req.getInputStream().readAllBytes();
+        long now = Instant.now().getEpochSecond();
+        int maxAge = props.getWebhook().getMaxAgeSeconds();
         boolean verified = false;
         for (Merchant m : merchants.findAll()) {
-            if (StripeSignature.verify(sig, raw, m.getWebhookSecret(),
-                    Instant.now().getEpochSecond(), props.getWebhook().getMaxAgeSeconds())) {
+            if (StripeSignature.verify(sig, raw, m.getWebhookSecret(), now, maxAge)) {
                 verified = true;
                 break;
             }
@@ -49,10 +86,12 @@ public class WebhookController {
         if (!verified) {
             return ResponseEntity.status(400).body(Map.of("error", "invalid signature"));
         }
+        return finishIngest(raw);
+    }
 
+    private ResponseEntity<?> finishIngest(byte[] raw) {
         WebhookService.Ingested ingested = svc.ingest(new String(raw, StandardCharsets.UTF_8));
         if (!ingested.accepted()) {
-            // Only invalid JSON or missing id/type reach this branch.
             return ResponseEntity.status(400).body(Map.of("error", ingested.error()));
         }
         return ResponseEntity.ok(Map.of(

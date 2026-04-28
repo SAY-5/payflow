@@ -34,8 +34,14 @@ public class AppProperties {
 
     public static class Webhook {
         private int maxAgeSeconds = 300;
+        /** Allow the deprecated unscoped /webhooks/stripe endpoint. Off
+         *  in prod by default — multi-merchant deployments must use the
+         *  per-merchant /webhooks/stripe/{id} URL Stripe assigns. */
+        private boolean allowLegacy = true;
         public int getMaxAgeSeconds() { return maxAgeSeconds; }
         public void setMaxAgeSeconds(int maxAgeSeconds) { this.maxAgeSeconds = maxAgeSeconds; }
+        public boolean isAllowLegacy() { return allowLegacy; }
+        public void setAllowLegacy(boolean allowLegacy) { this.allowLegacy = allowLegacy; }
     }
 
     public static class Cors {

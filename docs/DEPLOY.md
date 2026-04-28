@@ -1,0 +1,122 @@
+# Deploying PayFlow
+
+PayFlow is one stateful Spring Boot service plus a Postgres database
+plus a static React console. There are three deployment postures of
+varying maturity; pick the one that matches your traffic.
+
+## Posture A — single instance behind a reverse proxy
+
+Most teams should start here. One container, one Postgres, an nginx
+or Caddy in front for TLS.
+
+```bash
+# 1. Generate a real secret + webhook secret
+export PAYFLOW_JWT_SECRET=$(openssl rand -hex 32)
+
+# 2. Bring everything up
+docker compose up -d
+
+# 3. Tail the logs to confirm Flyway migrations applied
+docker compose logs -f payflow
+```
+
+The compose file already wires:
+- a Postgres 16 volume,
+- the API on `:8080` with a `/healthz` endpoint,
+- the right environment variables for JDBC + JWT.
+
+Operational requirements:
+- `PAYFLOW_JWT_SECRET` must be **≥ 32 bytes** in the `prod` profile.
+  The service throws `IllegalStateException` at startup with anything
+  shorter (this is intentional — short HMAC secrets are weaker than
+  the >=256-bit threshold the spec requires).
+- TLS must terminate at the proxy. The container speaks plain HTTP.
+- Webhook URLs configured in Stripe must point at
+  `https://your-host/webhooks/stripe/{merchantId}` — the per-merchant
+  scoped form. The legacy unscoped `/webhooks/stripe` endpoint can
+  be disabled via `PAYFLOW_WEBHOOK_ALLOW_LEGACY=false` once every
+  merchant is migrated.
+
+## Posture B — horizontally scaled stateless workers + shared Postgres
+
+PayFlow is **stateless**. Every request is fully described by its
+HTTP body + JWT; there is no in-memory session state. Scaling is
+straightforward:
+
+1. Run N instances behind any TCP/HTTP load balancer.
+2. Point them at one shared Postgres (managed RDS / Cloud SQL is
+   ideal — you don't want to run Postgres yourself for production
+   payments data).
+3. The idempotency manager uses a **per-(merchant, key)** unique
+   constraint, so two instances racing the same key will resolve
+   correctly: one INSERTs, the other catches the unique-violation
+   and returns `409 Conflict` with `Retry-After: 5`.
+4. The webhook ingester likewise uses a `UNIQUE(provider,
+   provider_event_id)` constraint to deduplicate event delivery
+   across replicas.
+5. If a worker crashes mid-charge (after the gateway returned but
+   before `recordOutcome` committed), the intent stays in
+   `PROCESSING`. The next inbound `payment_intent.*` webhook from
+   the provider reconciles it. There is no "stuck transaction"
+   recovery script needed.
+
+Health: `/actuator/health/liveness` and `/actuator/health/readiness`
+are exposed. Configure your orchestrator to wait for `readiness`
+before routing traffic — the service refuses early requests during
+Flyway migration.
+
+## Posture C — multi-region
+
+Out of scope for this project. PayFlow assumes a single primary
+Postgres; adding write-after-write conflict resolution across
+regions requires either a CRDT-friendly accounting model or pinning
+each merchant to a region. Don't do this without dedicated payments
+expertise.
+
+## Operational signals
+
+| Signal                     | Where                                                  |
+|----------------------------|--------------------------------------------------------|
+| Liveness                   | `GET /healthz` (200 OK = process is up)                |
+| Readiness                  | `GET /actuator/health/readiness`                       |
+| Metrics                    | `GET /actuator/metrics` (JVM, HTTP, JDBC pool, JPA)    |
+| Per-merchant volume        | `GET /v1/payment-intents/stats` (auth required)        |
+| Audit trail                | `audit_log` table — append-only, query in BI tools    |
+
+## Backups
+
+Run `pg_dump` nightly. Point-in-time recovery via WAL archiving is
+strongly recommended for production. Audit log entries are
+append-only by design (no UPDATE / DELETE in any code path), so
+forensic queries against historical state are reliable.
+
+## Failure-domain notes
+
+- **DB outage**: every endpoint will 503 because the JDBC pool
+  exhausts. Hikari's connection-acquire timeout is 30s by default.
+- **Gateway (Stripe) outage**: charges fail-closed (intent transitions
+  to `failed` with `gateway_error` failure code). Refunds queued by
+  the user remain `pending` and reconcile on the next `charge.refunded`
+  webhook. Because the gateway call now happens **outside** the DB
+  transaction, a slow gateway doesn't starve the DB pool.
+- **Lost webhook**: Stripe retries with exponential backoff up to
+  ~3 days. If the event genuinely never arrives, run
+  `agentlab-style` reconciliation by polling the provider
+  `payment_intents.list` and comparing against local state — code
+  for this is left as an exercise; the schema supports it.
+
+## Testing in CI vs production
+
+The Maven test suite uses **H2 in PostgreSQL-compatibility mode**
+for speed (the full suite runs in ~30 s). Three things differ on
+real Postgres:
+
+1. `BIGSERIAL` vs `GENERATED BY DEFAULT AS IDENTITY` — semantically
+   equivalent for our use (autoincrement IDs) but the SQL differs.
+2. `JSONB` is real on Postgres, simulated as `CLOB` on H2. Hibernate
+   handles the mapping transparently.
+3. Strict transaction isolation: H2's MVCC reports `DataIntegrity
+   ViolationException` slightly differently than Postgres on
+   concurrent uniques. The idempotency code is written against
+   Postgres' semantics; **the production verification path is the
+   Testcontainers integration suite** (planned, see issue tracker).

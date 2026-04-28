@@ -2,10 +2,10 @@ package com.say5.payflow.service;
 
 import com.say5.payflow.domain.PaymentStatus;
 import com.say5.payflow.persistence.*;
-import com.say5.payflow.persistence.*;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
@@ -34,30 +34,54 @@ public class PaymentService {
     public record CreateResult(PaymentIntent intent, Charge charge, boolean newlyCreated) {}
 
     /**
-     * Create and immediately confirm a payment intent. Wrapped in a single
-     * transaction so the intent, charge, and status updates commit as one.
-     * Returns the final state.
+     * Create-and-confirm pipeline split into three bounded transactions
+     * so the gateway call (potentially a slow network round trip to a
+     * real payment provider) does NOT hold a JDBC connection from the
+     * pool while waiting for the network.
+     *
+     *   1. persistPending(...)  — open tx, write intent + charge as
+     *      PROCESSING/pending, commit.
+     *   2. gateway.confirm(...) — out-of-tx network call, may take seconds.
+     *   3. recordOutcome(...)   — open tx, attach providerId, transition
+     *      intent to SUCCEEDED/FAILED, write audit row.
+     *
+     * If the process crashes between (2) and (3), the intent stays in
+     * PROCESSING and a reconciliation job (or the next inbound
+     * payment_intent.* webhook) will close it out.
      */
-    @Transactional
     public CreateResult createAndConfirm(CreateRequest r) {
         UUID intentId = UUID.randomUUID();
-        PaymentIntent intent = new PaymentIntent(
-            intentId, r.merchantId, r.customerId, r.amountCents, r.currency,
-            PaymentStatus.PROCESSING, r.description, r.metadataJson);
-        intents.save(intent);
-
         UUID chargeId = UUID.randomUUID();
+        String customerEmail = persistPending(intentId, chargeId, r);
+
+        StripeGateway.ConfirmResult cr = gateway.confirm(
+            intentId, r.amountCents(), r.currency(), customerEmail);
+
+        return recordOutcome(intentId, chargeId, r, cr);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public String persistPending(UUID intentId, UUID chargeId, CreateRequest r) {
+        PaymentIntent intent = new PaymentIntent(
+            intentId, r.merchantId(), r.customerId(), r.amountCents(), r.currency(),
+            PaymentStatus.PROCESSING, r.description(), r.metadataJson());
+        intents.save(intent);
         int attempt = (int) charges.countByIntentId(intentId) + 1;
         Charge charge = new Charge(chargeId, intentId, attempt, "pending");
         charges.save(charge);
-
-        String customerEmail = Optional.ofNullable(r.customerId)
+        return Optional.ofNullable(r.customerId())
             .flatMap(customers::findById)
             .map(Customer::getEmail)
             .orElse(null);
+    }
 
-        StripeGateway.ConfirmResult cr = gateway.confirm(
-            intentId, r.amountCents, r.currency, customerEmail);
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public CreateResult recordOutcome(UUID intentId, UUID chargeId, CreateRequest r,
+                                      StripeGateway.ConfirmResult cr) {
+        PaymentIntent intent = intents.findById(intentId)
+            .orElseThrow(() -> new IllegalStateException("intent vanished mid-flow"));
+        Charge charge = charges.findById(chargeId)
+            .orElseThrow(() -> new IllegalStateException("charge vanished mid-flow"));
         intent.setProviderId(cr.providerIntentId());
         if (cr.succeeded()) {
             charge.markSucceeded(cr.providerChargeId());
@@ -66,12 +90,10 @@ public class PaymentService {
             charge.markFailed(cr.failureCode(), cr.failureMessage());
             intent.setStatus(PaymentStatus.FAILED);
         }
-
-        audit.record("merchant", r.merchantId.toString(), "payment.create",
+        audit.record("merchant", r.merchantId().toString(), "payment.create",
             "payment_intent", intentId.toString(), null,
             cr.succeeded() ? "ok" : "error",
             "{\"failure\":\"" + (cr.failureCode() == null ? "" : cr.failureCode()) + "\"}");
-
         return new CreateResult(intent, charge, true);
     }
 
@@ -91,7 +113,6 @@ public class PaymentService {
         PaymentIntent pi = find(merchantId, intentId)
             .orElseThrow(() -> new IllegalArgumentException("not found"));
         if (pi.getStatus().isTerminal() && pi.getStatus() != PaymentStatus.SUCCEEDED) {
-            // Already canceled/failed — fine, return as-is.
             return pi;
         }
         if (pi.getStatus() == PaymentStatus.SUCCEEDED) {

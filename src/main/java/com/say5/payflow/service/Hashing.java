@@ -46,4 +46,12 @@ public final class Hashing {
         for (int i = 0; i < a.length(); i++) r |= a.charAt(i) ^ b.charAt(i);
         return r == 0;
     }
+
+    /** Constant-time equality for byte arrays. */
+    public static boolean constantTimeEqualsBytes(byte[] a, byte[] b) {
+        if (a == null || b == null || a.length != b.length) return false;
+        int r = 0;
+        for (int i = 0; i < a.length; i++) r |= a[i] ^ b[i];
+        return r == 0;
+    }
 }

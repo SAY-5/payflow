@@ -43,7 +43,9 @@ payflow:
     jwt-ttl-minutes: ${PAYFLOW_JWT_TTL:60}
   idempotency:
     ttl-days: 7
+    processing-timeout-seconds: ${PAYFLOW_IDEMPOTENCY_PROCESSING_TIMEOUT:60}
   webhook:
     max-age-seconds: 300
+    allow-legacy: ${PAYFLOW_WEBHOOK_ALLOW_LEGACY:true}
   cors:
     origins: ${PAYFLOW_CORS_ORIGINS:http://localhost:5173}

@@ -80,6 +80,21 @@ public class PaymentIntent {
         this.updatedAt = OffsetDateTime.now();
     }
 
+    /**
+     * Force the status without checking the terminal-transition guard.
+     *
+     * Reserved for the webhook reconciler: when the upstream provider
+     * reports a different terminal status than what we recorded
+     * locally, the provider is the authoritative ledger and we trust
+     * its decision. Application code must continue to use
+     * {@link #setStatus(PaymentStatus)} so accidental terminal-state
+     * transitions still throw.
+     */
+    public void overrideStatusFromAuthority(PaymentStatus s) {
+        this.status = s.wire();
+        this.updatedAt = OffsetDateTime.now();
+    }
+
     public void setProviderId(String providerId) {
         this.providerId = providerId;
         this.updatedAt = OffsetDateTime.now();
